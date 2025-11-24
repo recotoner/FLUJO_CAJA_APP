@@ -15,7 +15,8 @@ import sys
 import inspect
 
 from database.connection import engine, SessionLocal
-from database.models import Base
+from database.models import Base, Usuario  # <-- añadimos Usuario
+
 
 # Intentar importar la función init_db desde donde corresponda.
 # Primero desde database.init_db (más canónico), luego desde database.connection como fallback.
@@ -78,6 +79,29 @@ def main() -> None:
     else:
         print("\nℹ️ No se encontró función init_db; solo se crearon las tablas (sin seed).")
 
+    # 4) DEBUG: listar usuarios que ve Render en esta conexión
+    print("\n📋 Usuarios visibles desde esta conexión (PostgreSQL en Render):")
+    db_debug = None
+    try:
+        db_debug = SessionLocal()
+        users = db_debug.query(Usuario).all()
+        if not users:
+            print("   (sin usuarios en la tabla 'usuarios')")
+        else:
+            for u in users:
+                # imprimimos id y email para verificar que esté, por ejemplo, hrubilar@yahoo.es
+                print(f"   - {u.id} | {u.email}")
+    except Exception as e:
+        print(f"⚠️ No se pudo listar usuarios para debug: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if db_debug is not None:
+            try:
+                db_debug.close()
+            except Exception:
+                pass
+
     print("\n" + "=" * 60)
     print("✅ PROCESO DE INICIALIZACIÓN TERMINADO")
     print("=" * 60 + "\n")
@@ -85,5 +109,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
 
 
