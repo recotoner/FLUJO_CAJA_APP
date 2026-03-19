@@ -697,282 +697,6 @@ def cargar_datos_desde_bd(archivo_id, usuario_id):
         st.error(f"❌ Error al cargar datos desde BD: {e}")
         return None
 
-def buscar_saldo_final_en_archivo(path):
-    """
-    Busca el saldo final de la cartola usando regex directamente en el archivo Excel.
-    Busca en todas las direcciones (derecha, abajo, diagonal) y maneja diferentes formatos.
-    No depende de la estructura de columnas, busca en todo el archivo.
-    
-    Args:
-        path: Ruta del archivo Excel (.xlsx o .xls)
-    
-    Returns:
-        float o None: El saldo final encontrado, o None si no se encuentra
-    """
-    try:
-        import openpyxl
-        from openpyxl import load_workbook
-        import re
-        
-        # Verificar extensión del archivo
-        if not path.lower().endswith(('.xlsx', '.xls')):
-            return None
-        
-        def limpiar_numero(valor_str):
-            """Limpia un número de formato chileno (puntos de miles, coma decimal)"""
-            if isinstance(valor_str, (int, float)):
-                return float(valor_str)
-            
-            valor_str = str(valor_str).strip()
-            # Remover espacios y caracteres especiales excepto números, puntos y comas
-            valor_str = re.sub(r'[^\d.,]', '', valor_str)
-            
-            # Si tiene punto y coma, asumir formato chileno: 1.234.567,89
-            if ',' in valor_str and '.' in valor_str:
-                # Contar puntos para determinar si son miles
-                partes = valor_str.split(',')
-                if len(partes) == 2:
-                    parte_entera = partes[0].replace('.', '')
-                    parte_decimal = partes[1]
-                    return float(f"{parte_entera}.{parte_decimal}")
-            
-            # Si solo tiene puntos, pueden ser miles o decimales
-            if '.' in valor_str and ',' not in valor_str:
-                # Si tiene múltiples puntos, son miles
-                if valor_str.count('.') > 1:
-                    return float(valor_str.replace('.', ''))
-                else:
-                    # Un solo punto, puede ser decimal
-                    return float(valor_str)
-            
-            # Si solo tiene coma, puede ser decimal
-            if ',' in valor_str and '.' not in valor_str:
-                return float(valor_str.replace(',', '.'))
-            
-            # Sin puntos ni comas, convertir directamente
-            try:
-                return float(valor_str)
-            except:
-                return None
-        
-        def buscar_valor_numerico_cerca(sheet, fila, columna, max_distancia=10):
-            """Busca un valor numérico en celdas cercanas (derecha, abajo, diagonal)"""
-            valores_encontrados = []
-            
-            # Buscar en todas las direcciones - más agresivo
-            # Priorizar: derecha (col_offset positivo), luego abajo (row_offset positivo)
-            for col_offset in range(1, max_distancia + 1):  # Derecha primero
-                try:
-                    nueva_col = columna + col_offset
-                    if nueva_col < 1:
-                        continue
-                    
-                    cell = sheet.cell(fila, nueva_col)
-                    if cell.value is None:
-                        continue
-                    
-                    valor_limpio = limpiar_numero(cell.value)
-                    if valor_limpio is not None and abs(valor_limpio) > 1000:
-                        valores_encontrados.append((abs(valor_limpio), fila, nueva_col))
-                except:
-                    continue
-            
-            # Luego buscar abajo
-            for row_offset in range(1, max_distancia + 1):
-                try:
-                    nueva_fila = fila + row_offset
-                    if nueva_fila < 1:
-                        continue
-                    
-                    cell = sheet.cell(nueva_fila, columna)
-                    if cell.value is None:
-                        continue
-                    
-                    valor_limpio = limpiar_numero(cell.value)
-                    if valor_limpio is not None and abs(valor_limpio) > 1000:
-                        valores_encontrados.append((abs(valor_limpio), nueva_fila, columna))
-                except:
-                    continue
-            
-            # También buscar en diagonal (derecha-abajo)
-            for offset in range(1, min(max_distancia, 5) + 1):
-                try:
-                    nueva_fila = fila + offset
-                    nueva_col = columna + offset
-                    if nueva_fila < 1 or nueva_col < 1:
-                        continue
-                    
-                    cell = sheet.cell(nueva_fila, nueva_col)
-                    if cell.value is None:
-                        continue
-                    
-                    valor_limpio = limpiar_numero(cell.value)
-                    if valor_limpio is not None and abs(valor_limpio) > 1000:
-                        valores_encontrados.append((abs(valor_limpio), nueva_fila, nueva_col))
-                except:
-                    continue
-            
-            return valores_encontrados
-        
-        # Para archivos .xls, usar pandas
-        if path.lower().endswith('.xls'):
-            try:
-                # Leer más filas para buscar en el encabezado
-                df_temp = pd.read_excel(path, sheet_name=None, header=None, nrows=100)
-                saldos_encontrados = []
-                
-                for sheet_name, df_sheet in df_temp.items():
-                    # Buscar en todas las celdas
-                    for idx, row in df_sheet.iterrows():
-                        for col_idx, cell_value in enumerate(row):
-                            if pd.isna(cell_value):
-                                continue
-                            
-                            cell_str = str(cell_value).upper().strip()
-                            
-                            # Patrones más flexibles para "saldo" - buscar en cualquier parte
-                            patrones_saldo = [
-                                r'SALDO\s*FINAL',  # Sin ^ para buscar en cualquier parte
-                                r'SALDO\s*TOTAL',
-                                r'^SALDO\s*$',  # Solo "SALDO" al inicio
-                                r'^SALDO\s*:',
-                                r'^SALDO\s*=',
-                                r'BALANCE\s*FINAL',
-                                r'SALDO',  # Cualquier mención de SALDO
-                            ]
-                            
-                            tiene_patron = False
-                            for patron in patrones_saldo:
-                                if re.search(patron, cell_str, re.IGNORECASE):
-                                    tiene_patron = True
-                                    break
-                            
-                            if tiene_patron:
-                                # Buscar valores numéricos en celdas adyacentes (derecha y abajo) - más agresivo
-                                # Derecha (hasta 10 columnas)
-                                for offset in range(1, 11):
-                                    if col_idx + offset < len(row):
-                                        adj_value = row.iloc[col_idx + offset]
-                                        if pd.notna(adj_value):
-                                            valor_limpio = limpiar_numero(adj_value)
-                                            if valor_limpio is not None and abs(valor_limpio) > 1000:
-                                                saldos_encontrados.append((abs(valor_limpio), idx, col_idx + offset))
-                                
-                                # Abajo (en la misma columna, hasta 5 filas)
-                                for row_offset in range(1, 6):
-                                    if idx + row_offset < len(df_sheet):
-                                        cell_abajo = df_sheet.iloc[idx + row_offset, col_idx]
-                                        if pd.notna(cell_abajo):
-                                            valor_limpio = limpiar_numero(cell_abajo)
-                                            if valor_limpio is not None and abs(valor_limpio) > 1000:
-                                                saldos_encontrados.append((abs(valor_limpio), idx + row_offset, col_idx))
-                
-                if saldos_encontrados:
-                    # Ordenar por valor y tomar el más grande
-                    saldos_encontrados.sort(key=lambda x: x[0], reverse=True)
-                    return saldos_encontrados[0][0]
-            except Exception as e:
-                pass
-            
-            return None
-        
-        # Para archivos .xlsx, usar openpyxl
-        wb = load_workbook(path, data_only=True, read_only=True)
-        saldos_encontrados = []
-        
-        # Buscar en todas las hojas
-        for sheet_name in wb.sheetnames:
-            sheet = wb[sheet_name]
-            
-            # Buscar en TODAS las filas (más agresivo)
-            # Pero priorizar las primeras 100 y últimas 50
-            filas_prioritarias = list(range(1, min(101, sheet.max_row + 1)))
-            if sheet.max_row > 100:
-                filas_prioritarias.extend(range(max(101, sheet.max_row - 49), sheet.max_row + 1))
-            
-            # También buscar en todas las filas si no encontramos nada
-            todas_las_filas = list(range(1, sheet.max_row + 1))
-            
-            # Primero buscar en filas prioritarias
-            for row_num in filas_prioritarias:
-                try:
-                    row = sheet[row_num]
-                    for cell in row:
-                        if cell.value is None:
-                            continue
-                        
-                        # Convertir a string para buscar patrones
-                        cell_str = str(cell.value).upper().strip()
-                        
-                        # Patrones MÁS FLEXIBLES - buscar "SALDO" en cualquier parte
-                        patrones_saldo = [
-                            r'SALDO\s*FINAL',  # Sin ^ para buscar en cualquier parte
-                            r'SALDO\s*TOTAL',
-                            r'^SALDO\s*$',  # Solo "SALDO" al inicio
-                            r'^SALDO\s*:',  # "SALDO:" al inicio
-                            r'^SALDO\s*=',  # "SALDO=" al inicio
-                            r'BALANCE\s*FINAL',
-                            r'SALDO',  # Cualquier celda que contenga "SALDO"
-                        ]
-                        
-                        # Verificar si la celda contiene un patrón de saldo
-                        tiene_patron_saldo = False
-                        for patron in patrones_saldo:
-                            if re.search(patron, cell_str, re.IGNORECASE):
-                                tiene_patron_saldo = True
-                                break
-                        
-                        if tiene_patron_saldo:
-                            # Buscar valores numéricos en celdas cercanas (más agresivo)
-                            valores_cerca = buscar_valor_numerico_cerca(sheet, cell.row, cell.column, max_distancia=10)
-                            for valor, fila, col in valores_cerca:
-                                saldos_encontrados.append((valor, fila, col, sheet_name))
-                            
-                            # También buscar en el mismo texto si hay un número
-                            numeros_en_texto = re.findall(r'[\d.,]+', cell_str)
-                            for num_str in numeros_en_texto:
-                                valor_limpio = limpiar_numero(num_str)
-                                if valor_limpio is not None and abs(valor_limpio) > 1000:
-                                    saldos_encontrados.append((abs(valor_limpio), cell.row, cell.column, sheet_name))
-                except:
-                    continue
-            
-            # Si no encontramos nada en las filas prioritarias, buscar en todas
-            if not saldos_encontrados:
-                for row_num in todas_las_filas:
-                    if row_num in filas_prioritarias:
-                        continue  # Ya las buscamos
-                    try:
-                        row = sheet[row_num]
-                        for cell in row:
-                            if cell.value is None:
-                                continue
-                            
-                            cell_str = str(cell.value).upper().strip()
-                            
-                            # Buscar cualquier mención de "SALDO"
-                            if 'SALDO' in cell_str:
-                                valores_cerca = buscar_valor_numerico_cerca(sheet, cell.row, cell.column, max_distancia=10)
-                                for valor, fila, col in valores_cerca:
-                                    saldos_encontrados.append((valor, fila, col, sheet_name))
-                    except:
-                        continue
-        
-        wb.close()
-        
-        # Si encontramos saldos, tomar el más grande (probablemente el saldo final)
-        if saldos_encontrados:
-            # Ordenar por valor absoluto descendente
-            saldos_encontrados.sort(key=lambda x: abs(x[0]), reverse=True)
-            # Tomar el primero (el más grande)
-            saldo_final = saldos_encontrados[0][0]
-            return saldo_final
-        
-        return None
-    except Exception as e:
-        # Si hay error, retornar None (no crítico)
-        return None
-
 def encontrar_fila_encabezados(path):
     """
     Encuentra la fila que contiene los encabezados de las columnas.
@@ -1106,97 +830,56 @@ def cargar_datos(path, config_clasificadores):
                     mapeo_columnas[col] = "DESCRIPCION"
                     break
         
-        # Buscar ABONOS (con múltiples variantes)
-        columna_abonos_encontrada = None
+        # Buscar ABONOS
         if "ABONOS (CLP)" not in df.columns:
             for col in df.columns:
-                col_upper = col.upper()
-                if "ABONO" in col_upper and "CLP" in col_upper:
+                if "ABONO" in col.upper() and "CLP" in col.upper():
                     mapeo_columnas[col] = "ABONOS (CLP)"
-                    columna_abonos_encontrada = col
                     break
-                elif "ABONO" in col_upper:
+                elif "ABONO" in col.upper():
                     mapeo_columnas[col] = "ABONOS (CLP)"
-                    columna_abonos_encontrada = col
                     break
-                elif "CREDITO" in col_upper and "CLP" in col_upper:
+                elif "CREDITO" in col.upper() and "CLP" in col.upper():
                     mapeo_columnas[col] = "ABONOS (CLP)"
-                    columna_abonos_encontrada = col
-                    break
-                elif "DEPOSITO" in col_upper or "DEPÓSITO" in col_upper:
-                    # DEPOSITOS es equivalente a ABONOS
-                    mapeo_columnas[col] = "ABONOS (CLP)"
-                    columna_abonos_encontrada = col
-                    break
-                elif "INGRESO" in col_upper and ("CLP" in col_upper or "PESO" in col_upper):
-                    mapeo_columnas[col] = "ABONOS (CLP)"
-                    columna_abonos_encontrada = col
                     break
         
-        # Buscar CARGOS (para formatos que tienen DEPOSITOS y CARGOS separados)
-        columna_cargos_encontrada = None
+        # Buscar CARGOS (muchos bancos cambian encabezados: CARGOS/DEBITO/EGRESOS)
         if "CARGOS (CLP)" not in df.columns:
             for col in df.columns:
                 col_upper = col.upper()
-                if "CARGO" in col_upper and "CLP" in col_upper:
+                # Incluye variantes con y sin "(CLP)"
+                if ("CARGO" in col_upper or "DEBITO" in col_upper or "DÉBITO" in col_upper) and "CLP" in col_upper:
                     mapeo_columnas[col] = "CARGOS (CLP)"
-                    columna_cargos_encontrada = col
                     break
-                elif "CARGO" in col_upper and "DEPOSITO" not in col_upper:
+                if ("CARGOS" in col_upper or "EGRESO" in col_upper or "EGRESOS" in col_upper) and ("CLP" in col_upper or True):
                     mapeo_columnas[col] = "CARGOS (CLP)"
-                    columna_cargos_encontrada = col
                     break
-                elif "DEBITO" in col_upper or "DÉBITO" in col_upper:
+                if ("DEBITO" in col_upper or "DÉBITO" in col_upper) and ("CLP" in col_upper):
                     mapeo_columnas[col] = "CARGOS (CLP)"
-                    columna_cargos_encontrada = col
                     break
-                elif "EGRESO" in col_upper and ("CLP" in col_upper or "PESO" in col_upper):
-                    mapeo_columnas[col] = "CARGOS (CLP)"
-                    columna_cargos_encontrada = col
-                    break
-        
+
         # Aplicar mapeo
         if mapeo_columnas:
             df.rename(columns=mapeo_columnas, inplace=True)
-        
-        # Si tenemos DEPOSITOS y CARGOS pero no ABONOS, crear ABONOS = DEPOSITOS - CARGOS
-        # O si solo tenemos DEPOSITOS, usar DEPOSITOS como ABONOS
-        if "ABONOS (CLP)" not in df.columns:
-            if "DEPOSITOS" in df.columns or "DEPÓSITOS" in df.columns:
-                col_depositos = "DEPOSITOS" if "DEPOSITOS" in df.columns else "DEPÓSITOS"
-                if "CARGOS (CLP)" in df.columns:
-                    # ABONOS = DEPOSITOS - CARGOS (neto)
-                    df["ABONOS (CLP)"] = df[col_depositos].fillna(0).astype(float) - df["CARGOS (CLP)"].fillna(0).astype(float)
-                else:
-                    # Solo DEPOSITOS, usarlos directamente como ABONOS
-                    df["ABONOS (CLP)"] = df[col_depositos].fillna(0).astype(float)
-                # Eliminar la columna temporal DEPOSITOS
-                df.drop(columns=[col_depositos], inplace=True, errors='ignore')
-        
-        # Si tenemos CARGOS pero no la columna CARGOS (CLP), crearla
-        if "CARGOS (CLP)" not in df.columns:
-            # Buscar si hay alguna columna de cargos que no se mapeó
-            for col in df.columns:
-                col_upper = col.upper()
-                if ("CARGO" in col_upper or "DEBITO" in col_upper or "DÉBITO" in col_upper) and "ABONO" not in col_upper and "DEPOSITO" not in col_upper:
-                    df.rename(columns={col: "CARGOS (CLP)"}, inplace=True)
-                    break
-        
+
         # Validar columnas requeridas
         columnas_requeridas = ["DESCRIPCION", "FECHA", "ABONOS (CLP)"]
         columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
         
         if columnas_faltantes:
-            # Mostrar columnas disponibles para ayudar al usuario
-            st.error(f"❌ El archivo no contiene las columnas requeridas: {', '.join(columnas_faltantes)}")
+            # Aviso amigable para el cliente: formato no corresponde a "Cartola Histórica"
+            st.warning(
+                "⚠️ Este archivo no parece tener el formato esperado (Cartola Histórica). "
+                "Vuelve a descargar/subir la 'Cartola Histórica' del banco (no 'Movimientos del mes')."
+            )
             st.info(f"💡 Columnas encontradas en el archivo: {', '.join(df.columns.tolist()[:15])}")
+            st.caption(f"Detalles técnicos (faltan columnas mínimas): {', '.join(columnas_faltantes)}")
             
             # Mostrar primeras filas para ayudar a entender la estructura
             with st.expander("🔍 Ver primeras filas del archivo (para depuración)"):
                 st.dataframe(df.head(10))
             
             st.info("💡 Si tu archivo tiene un formato diferente, puedes configurar el mapeo de columnas en la sección de configuración.")
-            st.info("💡 Formatos soportados: ABONOS, DEPOSITOS, CREDITOS, INGRESOS (para ingresos) y CARGOS, DEBITOS, EGRESOS (para egresos)")
             
             return None
 
@@ -1204,6 +887,10 @@ def cargar_datos(path, config_clasificadores):
         df["DESCRIPCION"] = df["DESCRIPCION"].astype(str)
         df["COMENTARIO"] = df["DESCRIPCION"].apply(normalizar)
         df["FECHA"] = pd.to_datetime(df["FECHA"], dayfirst=True, errors='coerce')
+
+        # Si no se pudo identificar CARGOS, crearla para que métricas/gráficos no fallen
+        if "CARGOS (CLP)" not in df.columns:
+            df["CARGOS (CLP)"] = 0
 
         # Clasificar transacciones
         df["CLASIFICACION"] = df.apply(
@@ -1336,14 +1023,10 @@ if archivo_subido:
         if 'df_cargado_bd' in st.session_state:
             del st.session_state.df_cargado_bd
         
-        # Guardar archivo temporalmente (preservar extensión original)
-        extension = archivo_subido.name.split('.')[-1] if '.' in archivo_subido.name else 'xlsx'
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{extension}') as tmp_file:
+        # Guardar archivo temporalmente
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
             tmp_file.write(archivo_subido.getvalue())
             archivo = tmp_file.name
-        
-        # Guardar la ruta del archivo temporal para búsqueda de saldo con regex
-        st.session_state.ruta_archivo_temporal = archivo
         
         # Marcar que se procesó un archivo nuevo (para mostrar el botón de guardar)
         st.session_state.archivo_nuevo_procesado = True
@@ -1683,7 +1366,6 @@ if config_clasificadores is not None and usuario_actual:
             diferencia = None
             fecha_saldo_cartola = None
             
-            # MÉTODO 1: Intentar leer desde la columna SALDO (CLP) del DataFrame
             if "SALDO (CLP)" in df.columns and "FECHA" in df.columns:
                 # Filtrar solo filas con saldo no nulo
                 filas_con_saldo = df[df["SALDO (CLP)"].notna()].copy()
@@ -1691,6 +1373,11 @@ if config_clasificadores is not None and usuario_actual:
                     # Asegurar que FECHA esté en formato datetime
                     if not pd.api.types.is_datetime64_any_dtype(filas_con_saldo["FECHA"]):
                         filas_con_saldo["FECHA"] = pd.to_datetime(filas_con_saldo["FECHA"], errors='coerce')
+
+                    # Candidato 1: último saldo por orden original en el DataFrame
+                    fila_saldo_index = filas_con_saldo.iloc[-1:]
+                    saldo_index = float(fila_saldo_index["SALDO (CLP)"].values[0])
+                    fecha_index = fila_saldo_index["FECHA"].values[0]
                     
                     # Verificar si todas las fechas son iguales
                     fechas_unicas = filas_con_saldo["FECHA"].nunique()
@@ -1705,38 +1392,20 @@ if config_clasificadores is not None and usuario_actual:
                         filas_con_saldo = filas_con_saldo.sort_values(by="FECHA", ascending=True, na_position='last')
                         fila_saldo = filas_con_saldo.iloc[-1:]
                     
-                    saldo_cartola = float(fila_saldo["SALDO (CLP)"].values[0])
-                    fecha_saldo_cartola = fila_saldo["FECHA"].values[0]
-                    diferencia = saldo_calculado - saldo_cartola
-            
-            # MÉTODO 2: Si no se encontró en las columnas, buscar con regex en el archivo original
-            if saldo_cartola is None:
-                # Buscar la ruta del archivo temporal (si existe)
-                ruta_archivo = st.session_state.get('ruta_archivo_temporal', None)
-                
-                # Si no hay ruta temporal, intentar obtenerla del archivo subido actual
-                if ruta_archivo is None and archivo is not None:
-                    ruta_archivo = archivo
-                
-                if ruta_archivo and os.path.exists(ruta_archivo):
-                    try:
-                        saldo_encontrado = buscar_saldo_final_en_archivo(ruta_archivo)
-                        if saldo_encontrado is not None:
-                            saldo_cartola = float(saldo_encontrado)
-                            # Intentar obtener la fecha más reciente del DataFrame como referencia
-                            if "FECHA" in df.columns:
-                                fecha_saldo_cartola = df["FECHA"].max()
-                            diferencia = saldo_calculado - saldo_cartola
-                        else:
-                            # Debug: mostrar que se intentó buscar pero no se encontró
-                            with st.expander("🔍 Debug: Búsqueda de saldo", expanded=False):
-                                st.info(f"Se intentó buscar el saldo en el archivo: {os.path.basename(ruta_archivo)}")
-                                st.warning("No se encontró el saldo final en el archivo. Verifica que el archivo contenga 'Saldo Final' o 'Saldo' cerca del valor numérico.")
-                    except Exception as e:
-                        # Si hay error en la búsqueda con regex, continuar sin saldo
-                        with st.expander("🔍 Debug: Error al buscar saldo", expanded=False):
-                            st.error(f"Error al buscar saldo: {e}")
-                        pass
+                    saldo_fecha = float(fila_saldo["SALDO (CLP)"].values[0])
+                    fecha_saldo_fecha = fila_saldo["FECHA"].values[0]
+                    diferencia_fecha = saldo_calculado - saldo_fecha
+                    diferencia_index = saldo_calculado - saldo_index
+
+                    # Elegir el candidato cuyo saldo quede más cerca del saldo calculado
+                    if abs(diferencia_fecha) <= abs(diferencia_index):
+                        saldo_cartola = saldo_fecha
+                        fecha_saldo_cartola = fecha_saldo_fecha
+                        diferencia = diferencia_fecha
+                    else:
+                        saldo_cartola = saldo_index
+                        fecha_saldo_cartola = fecha_index
+                        diferencia = diferencia_index
 
             col4, col5 = st.columns(2)
             col4.metric("📌 Saldo Final Calculado", f"${saldo_calculado:,.0f}")
@@ -1744,7 +1413,17 @@ if config_clasificadores is not None and usuario_actual:
                 col5.metric("🏦 Saldo según cartola", f"${saldo_cartola:,.0f}", delta=f"${diferencia:,.0f}")
                 st.caption(f"💡 Saldo cartola al {pd.to_datetime(fecha_saldo_cartola).strftime('%d-%m-%Y')}")
             else:
-                col5.warning("No se pudo leer saldo final de cartola.")
+                # Fallback: si el Excel/BD no trae SALDO (CLP), mostramos el saldo calculado para no dejar vacío.
+                # Indica que no se pudo leer el saldo directamente desde la cartola.
+                saldo_cartola = saldo_calculado
+                diferencia = 0
+                if "FECHA" in df.columns and not df["FECHA"].empty:
+                    try:
+                        fecha_saldo_cartola = df["FECHA"].max()
+                    except:
+                        fecha_saldo_cartola = None
+                col5.metric("🏦 Saldo según cartola", f"${saldo_cartola:,.0f}", delta=f"${diferencia:,.0f}")
+                st.caption("💡 No se pudo leer el saldo final directamente desde la cartola; se mostró el saldo calculado.")
 
             # ---------- TABLA DETALLE ----------
             st.subheader("🔍 Detalle de transacciones clasificadas")
