@@ -14,7 +14,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-from database import crud_proyeccion as crud_p
+try:
+    from database import crud_proyeccion as crud_p
+except Exception:
+    # Fallback para despliegues donde crud_proyeccion.py quedó en raíz del proyecto.
+    import crud_proyeccion as crud_p
 from database.connection import get_db
 from database.crud import (
     obtener_archivos,
