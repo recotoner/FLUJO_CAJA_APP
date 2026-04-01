@@ -189,6 +189,35 @@ st.markdown("""
         border-radius: 6px;
         padding: 0.5rem;
     }
+
+    /* Tabs principales (Flujo Historico / Proyeccion) mas visibles */
+    .stTabs [data-baseweb="tab-list"] {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.65rem;
+        margin: 0.35rem 0 1rem 0;
+        border-bottom: 2px solid #d7e3ef;
+        padding-bottom: 0.35rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 52px;
+        width: 100%;
+        justify-content: center;
+        padding: 0 1.2rem;
+        border-radius: 12px 12px 0 0;
+        font-size: 1.12rem;
+        font-weight: 700;
+        line-height: 1.1;
+        color: #26415a;
+        background: #eef3f8;
+        border: 1px solid #d2dde8;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #ffffff !important;
+        background: linear-gradient(135deg, #1f77b4 0%, #2a9d8f 100%) !important;
+        border-color: transparent !important;
+        box-shadow: 0 4px 10px rgba(31, 119, 180, 0.28);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1805,6 +1834,8 @@ if config_clasificadores is not None and usuario_actual:
             col4, col5 = st.columns(2)
             col4.metric("📌 Saldo Final Calculado", f"${saldo_calculado:,.0f}")
             if saldo_cartola is not None:
+                # Se comparte con Tab 2 para que "Saldo inicial caja (Tab 1)" replique este mismo valor.
+                st.session_state["saldo_tab1_actual"] = float(saldo_cartola)
                 col5.metric("🏦 Saldo según cartola", f"${saldo_cartola:,.0f}", delta=f"${diferencia:,.0f}")
                 st.caption(f"💡 Saldo cartola al {pd.to_datetime(fecha_saldo_cartola).strftime('%d-%m-%Y')}")
             else:
@@ -1812,6 +1843,8 @@ if config_clasificadores is not None and usuario_actual:
                 # Indica que no se pudo leer el saldo directamente desde la cartola.
                 saldo_cartola = saldo_calculado
                 diferencia = 0
+                # Mantener consistencia entre tabs incluso cuando no exista saldo explícito en cartola.
+                st.session_state["saldo_tab1_actual"] = float(saldo_cartola)
                 if "FECHA" in df.columns and not df["FECHA"].empty:
                     try:
                         fecha_saldo_cartola = df["FECHA"].max()
@@ -1860,3 +1893,10 @@ if config_clasificadores is not None and usuario_actual:
             st.warning("⚠️ No se pudieron cargar los datos o el archivo está vacío.")
 else:
     st.error("❌ No se puede continuar sin la configuración de clasificadores.")
+
+# ── TAB 2: Proyección de Caja ──────────────────────────────────────
+# NOTA: Este bloque no modifica Tab 1. Solo agrega navegación por tabs.
+tab1, tab2 = st.tabs(["📊 Flujo Histórico", "🔮 Proyección de Caja"])
+with tab2:
+    from proyeccion_caja import render_proyeccion
+    render_proyeccion(usuario_actual)
