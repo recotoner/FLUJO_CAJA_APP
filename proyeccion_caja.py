@@ -1994,10 +1994,14 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
     fact_cargadas = _facturas_ultimas_cargas(user_id)
     cxc_carg = sum(_monto_factura(f) for f in fact_cargadas if f.tipo == "por_cobrar")
     cxp_carg = sum(_monto_factura(f) for f in fact_cargadas if f.tipo == "por_pagar")
+    # Algunos ERP (p. ej. KAMA) traen CxP con saldo negativo; restar ese total hace cxc - (-cxp) y
+    # infla el "Saldo Cobrar - Pagar". Aquí se usa magnitud en pagar y neto = cobrar − pagar.
+    cxp_mag = abs(cxp_carg)
+    saldo_cob_menos_pag = cxc_carg - cxp_mag
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("Facturas por Cobrar", f"${cxc_carg:,.0f}")
-    r2.metric("Facturas por Pagar", f"${cxp_carg:,.0f}")
-    r3.metric("Saldo Cobrar - Pagar", f"${(cxc_carg - cxp_carg):,.0f}")
+    r2.metric("Facturas por Pagar", f"${cxp_mag:,.0f}")
+    r3.metric("Saldo Cobrar - Pagar", f"${saldo_cob_menos_pag:,.0f}")
     r4.metric("Registros facturas", f"{len(fact_cargadas):,}")
     st.caption("Este resumen usa solo la última carga de CxC y CxP para mantener una base limpia antes de proyectar.")
     st.markdown("</div>", unsafe_allow_html=True)
