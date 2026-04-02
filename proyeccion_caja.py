@@ -110,9 +110,21 @@ def _iter_months_in_range(inicio: date, fin: date) -> Iterable[Tuple[int, int]]:
 
 
 def _mapa_categorias_codigo_a_id() -> Dict[str, int]:
+    """
+    Un codigo por fila. Si en BD hay duplicados del mismo `codigo` (p. ej. re-seeds),
+    se usa el **menor id** para comportamiento estable (evita que el último Arbitrario pise el id correcto).
+    """
     out: Dict[str, int] = {}
-    for c in crud_p.listar_categorias_financieras():
-        out[c.codigo] = c.id
+    filas = sorted(
+        crud_p.listar_categorias_financieras(),
+        key=lambda c: (c.id or 0),
+    )
+    for c in filas:
+        cod = (c.codigo or "").strip()
+        if not cod:
+            continue
+        if cod not in out:
+            out[cod] = c.id
     return out
 
 
@@ -232,8 +244,8 @@ def _fraccion_flujo_estimado_manual_lineas(lineas: List[ProyeccionLinea]) -> flo
 
 def _obtener_saldo_cartola_real(user_id: int, archivo_id: Optional[int] = None) -> Decimal:
     """
-    Saldo cartola real desde Tab 1 (transacciones históricas), tomando el último saldo no nulo.
-    Si no hay saldo disponible, retorna 0.
+    Saldo al cierre según cartola: fecha ascendente; mismo día id descendente (carga típica más reciente
+    arriba). Propagación si falta saldo en la última línea. Sin columna saldo, equivale al neto del extracto.
     """
     try:
         trans = obtener_transacciones(user_id=user_id, archivo_id=archivo_id)
@@ -303,33 +315,31 @@ def _obtener_saldo_cartola_real(user_id: int, archivo_id: Optional[int] = None) 
         except Exception:
             return Decimal(0)
 
+    trans_list = list(trans)
+    trans_list.sort(
+        key=lambda t: (
+            getattr(t, "fecha", None) or date.min,
+            -int(getattr(t, "id", None) or 0),
+        )
+    )
+
+    running: Optional[Decimal] = None
     saldo_calculado = Decimal(0)
-    filas_con_saldo: List[Tuple[Any, Decimal]] = []
-    for t in trans:
+    for t in trans_list:
         ab = _dec_loose(getattr(t, "abono", None))
         cg = _dec_loose(getattr(t, "cargo", None))
         saldo_calculado += ab - cg
         raw_saldo = getattr(t, "saldo", None)
         if raw_saldo is not None:
-            filas_con_saldo.append((getattr(t, "fecha", None), _dec_loose(raw_saldo)))
+            running = _dec_loose(raw_saldo)
+        elif running is not None:
+            running = running + ab - cg
+        else:
+            running = ab - cg
 
-    if not filas_con_saldo:
-        # Igual que Tab 1 cuando no hay SALDO util: usar neto abonos-cargos.
-        return saldo_calculado
-
-    # Candidato por orden original (ultimo movimiento de la cartola).
-    saldo_index = filas_con_saldo[-1][1]
-    # Candidato por fecha (ultima fecha registrada).
-    filas_fecha = sorted(
-        filas_con_saldo,
-        key=lambda x: (x[0] or date.min),
-    )
-    saldo_fecha = filas_fecha[-1][1]
-
-    # Igual que Tab 1: elegir el saldo mas cercano al calculado.
-    if abs(saldo_calculado - saldo_fecha) <= abs(saldo_calculado - saldo_index):
-        return saldo_fecha
-    return saldo_index
+    if running is not None:
+        return running
+    return saldo_calculado
 
 
 def _resolver_archivo_tab1_activo(user_id: int) -> Optional[int]:
@@ -905,6 +915,9 @@ def generar_snapshot(
     if periodo_dias not in (30, 60, 90):
         periodo_dias = min(max(30, periodo_dias), 90)
 
+    # PostgreSQL / deploy nuevo: asegura categorías (p. ej. CREDITO_BANCARIO activo).
+    crud_p.seed_categorias_financieras()
+
     fecha_proyeccion = date.today()
     # Para que "Vencidos/Por vencer/Todos" sea consistente con Excel, el snapshot
     # debe incluir también los vencidos más antiguos que existan en la ultima carga.
@@ -932,6 +945,14 @@ def generar_snapshot(
             raise ValueError(
                 f"Falta categoría financiera '{req}'. Ejecute seed_categorias_financieras o revise la BD."
             )
+
+    creditos_activos = crud_p.listar_proyeccion_creditos_bancarios(user_id, solo_activos=True)
+    if creditos_activos and cats.get("CREDITO_BANCARIO") is None:
+        raise ValueError(
+            "Hay créditos bancarios activos en tu cuenta pero falta la categoría financiera "
+            "`CREDITO_BANCARIO` (debe existir y estar activa). "
+            "En servidor: ejecute `seed_categorias_financieras` / init_db y evite códigos duplicados en `categorias_financieras`."
+        )
 
     slots_iva_ppm: set[Tuple[date, int]] = set()
     especs = _construir_lineas_snapshot(user_id, periodo_inicio, periodo_fin, cats, slots_iva_ppm)
@@ -1287,6 +1308,13 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
         return
 
     user_id = usuario.id
+    _seed_ss = f"proy_cat_seed_v2_{user_id}"
+    if not st.session_state.get(_seed_ss):
+        try:
+            crud_p.seed_categorias_financieras()
+        except Exception:
+            pass
+        st.session_state[_seed_ss] = True
     modo_presentacion = st.toggle(
         "Modo presentación gerencial (vista más limpia)",
         value=False,
@@ -1294,6 +1322,66 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
     )
     if modo_presentacion:
         st.caption("Vista gerencial activa: foco en KPIs, matriz por fecha y comparativo.")
+
+    with st.expander("Diagnóstico: créditos y retenciones (si no aparecen en la proyección)", expanded=False):
+        st.caption(
+            "Comprueba que exista la categoría **CREDITO_BANCARIO**, que los registros estén en BD "
+            "y que la fecha de impacto caiga dentro de la ventana del próximo snapshot."
+        )
+        if st.button("Sincronizar categorías maestras ahora", key=f"btn_seed_cat_{user_id}"):
+            try:
+                nch = crud_p.seed_categorias_financieras()
+                st.success(f"Categorías sincronizadas (cambios: {nch}). Genere la proyección de nuevo.")
+            except Exception as ex:
+                st.error(str(ex))
+        cats_d = _mapa_categorias_codigo_a_id()
+        cb_id = cats_d.get("CREDITO_BANCARIO")
+        if cb_id:
+            st.markdown(f"- **CREDITO_BANCARIO** en mapa: `id {cb_id}`")
+        else:
+            st.error(
+                "❌ No hay categoría **CREDITO_BANCARIO** activa: las cuotas de crédito **no** se agregan al snapshot. "
+                "Pulse «Sincronizar categorías maestras» arriba."
+            )
+        cat_hon = crud_p.obtener_categoria_por_codigo("HONORARIOS")
+        cat_ret = crud_p.obtener_categoria_por_codigo("RETENCION")
+        st.markdown(
+            f"- **HONORARIOS** → `id {cat_hon.id if cat_hon else '—'}` · "
+            f"**RETENCION** → `id {cat_ret.id if cat_ret else '—'}`"
+        )
+        if not cat_hon or not cat_ret:
+            st.warning("Faltan categorías HONORARIOS o RETENCION. Use «Sincronizar categorías maestras».")
+        creds = crud_p.listar_proyeccion_creditos_bancarios(user_id, solo_activos=True)
+        st.markdown(f"- Créditos bancarios **activos** en BD: **{len(creds)}**")
+        for c in creds[:8]:
+            st.caption(
+                f"  · id {c.id} · próximo **{c.fecha_proximo_pago}** · cuota ${_dec(c.monto_cuota):,.0f} · "
+                f"pend. **{c.cuotas_pendientes}**"
+            )
+        eggs = crud_p.listar_proyeccion_egresos_parametricos(user_id)
+        id_h = cat_hon.id if cat_hon else None
+        id_r = cat_ret.id if cat_ret else None
+        hr_rows = [e for e in eggs if id_h is not None and id_r is not None and e.categoria_id in (id_h, id_r)]
+        st.markdown(f"- Egresos paramétricos honorarios/retención: **{len(hr_rows)}** filas")
+        for e in hr_rows[-10:]:
+            cx = crud_p.obtener_categoria_por_id(e.categoria_id)
+            cod = (cx.codigo if cx else "?")
+            st.caption(
+                f"  · id {e.id} **{cod}** · ${float(_dec(e.monto_estimado) or 0):,.0f} · "
+                f"día pago {e.dia_pago} · mes_aplicación **{e.mes_aplicacion}**"
+            )
+        _fp = date.today()
+        _facts = _facturas_ultimas_cargas(user_id)
+        _vmin = None
+        for _f in _facts:
+            if _f.fecha_vencimiento is not None:
+                _vmin = _f.fecha_vencimiento if _vmin is None else min(_vmin, _f.fecha_vencimiento)
+        _p0 = _vmin if (_vmin is not None and _vmin < _fp) else _fp
+        _p1 = _fp + timedelta(days=30)
+        st.info(
+            f"Ventana **aproximada** al generar con **30 días** hoy: **`{_p0}`** → **`{_p1}`**. "
+            f"Fuera de ese tramo no hay líneas en el snapshot (use 60/90 días o corrija fechas)."
+        )
 
     with st.expander("Parámetros fiscales y días de pago", expanded=False):
         render_modulo_parametros_usuario(usuario)
@@ -2261,6 +2349,7 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
     total_contado_proy = Decimal(0)
     total_recup_morosos_proy = Decimal(0)
     total_compra_contado_proy = Decimal(0)
+    neg_clientes_en_flujo = Decimal(0)  # reducciones CxC (p. ej. mora) ya neteadas en el KPI verde
     _cat_cache_cxc: Dict[int, str] = {}
     for _l in lineas_filtradas:
         _m = _dec(_l.monto)
@@ -2270,6 +2359,8 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
             _cat_cache_cxc[_cid] = ((_c.codigo if _c else "") or "").strip().upper()
         if _cat_cache_cxc[_cid] == "CLIENTES":
             total_cxc_proy += _m
+            if _m < 0:
+                neg_clientes_en_flujo += _m
             _desc_l = ((_l.descripcion or "").strip().lower())
             if "ventas contado esperadas" in _desc_l:
                 total_contado_proy += _m
@@ -2280,6 +2371,11 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
             if "compras contado esperadas" in _desc_l:
                 total_compra_contado_proy += _m
     total_cxc_credito_neto = total_cxc_proy - total_contado_proy - total_recup_morosos_proy
+    # Egresos mostrados: sin filas negativas CLIENTES (van ya dentro del neto "Cobros CxC").
+    total_egr_kpi = total_egr - neg_clientes_en_flujo
+    flujo_total_todas_lineas = total_ing + total_egr
+    # Saldo neto del bloque KPI = exactamente verde + roja (criterio usuario).
+    saldo_neto_periodo = total_cxc_proy + total_egr_kpi
     colm1, colm2, colm3, colm4 = st.columns(4)
     with colm1:
         st.markdown(
@@ -2300,11 +2396,16 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
         st.markdown(
             f"""
             <div class="proy-kpi-card proy-kpi-egr">
-              <div class="proy-kpi-label">Egresos proyección guardada</div>
-              <div class="proy-kpi-value">${total_egr:,.0f}</div>
+              <div class="proy-kpi-label">Egresos (otras categorías)</div>
+              <div class="proy-kpi-value">${total_egr_kpi:,.0f}</div>
             </div>
             """,
             unsafe_allow_html=True,
+        )
+    if neg_clientes_en_flujo != 0:
+        st.caption(
+            f"Reducciones ya incluidas en *Cobros CxC* (p. ej. morosidad): **${neg_clientes_en_flujo:,.0f}**. "
+            f"No se repiten en egresos. **Saldo neto período = Cobros CxC + Egresos (otras categorías)**."
         )
     if total_compra_contado_proy != 0:
         st.caption(
@@ -2315,7 +2416,7 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
             f"""
             <div class="proy-kpi-card proy-kpi-net">
               <div class="proy-kpi-label">Saldo neto período</div>
-              <div class="proy-kpi-value">${(total_ing + total_egr):,.0f}</div>
+              <div class="proy-kpi-value">${saldo_neto_periodo:,.0f}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2330,6 +2431,12 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
             """,
             unsafe_allow_html=True,
         )
+    _fuera_bloque_kpi = flujo_total_todas_lineas - saldo_neto_periodo
+    if abs(_fuera_bloque_kpi) > Decimal("500"):
+        st.caption(
+            f"En el mismo período, el detalle suma **${flujo_total_todas_lineas:,.0f}** en todas las líneas; "
+            f"la diferencia **${_fuera_bloque_kpi:,.0f}** son netos en categorías no cubiertas por estas dos tarjetas (p. ej. IVA)."
+        )
     # Saldo inicial/arrastre visible desde Tab 1 para lectura de caja real.
     # Prioridad: saldo ya calculado en Tab 1 (misma sesión) para consistencia exacta.
     saldo_ss = st.session_state.get("saldo_tab1_actual")
@@ -2342,7 +2449,7 @@ def render_proyeccion(usuario: Optional[Usuario]) -> None:
         saldo_cartola_real = float(_obtener_saldo_cartola_real(user_id, archivo_id_tab1))
     s1, s2 = st.columns(2)
     s1.metric("Saldo inicial caja (Tab 1)", f"${saldo_cartola_real:,.0f}")
-    s2.metric("Saldo final proyectado (inicial + flujo neto)", f"${(saldo_cartola_real + float(total_ing + total_egr)):,.0f}")
+    s2.metric("Saldo final proyectado (inicial + flujo neto)", f"${(saldo_cartola_real + float(saldo_neto_periodo)):,.0f}")
 
     if lineas_filtradas:
         fechas, montos, doms = _agregacion_diaria_waterfall(lineas_filtradas)
