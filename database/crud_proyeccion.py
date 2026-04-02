@@ -128,14 +128,19 @@ def _sumar_un_mes_mismo_dia(fecha: date) -> date:
 def seed_categorias_financieras() -> int:
     """
     Inserta categorías maestras si no existen (idempotente por codigo).
-    Retorna cantidad de filas insertadas.
+    Si existe pero está inactiva (p. ej. en BD servidor tras pruebas), la reactiva.
+    Retorna cantidad de filas insertadas o reactivadas.
     """
     db = next(get_db())
     inserted = 0
+    reactivated = 0
     try:
         for row in SEED_CATEGORIAS_FINANCIERAS:
             ex = db.query(CategoriaFinanciera).filter(CategoriaFinanciera.codigo == row["codigo"]).first()
             if ex:
+                if ex.activo is not True:
+                    ex.activo = True
+                    reactivated += 1
                 continue
             db.add(
                 CategoriaFinanciera(
@@ -150,7 +155,7 @@ def seed_categorias_financieras() -> int:
             )
             inserted += 1
         db.commit()
-        return inserted
+        return inserted + reactivated
     except Exception:
         db.rollback()
         raise
@@ -181,7 +186,11 @@ def obtener_categoria_por_id(categoria_id: int) -> Optional[CategoriaFinanciera]
 def obtener_categoria_por_codigo(codigo: str) -> Optional[CategoriaFinanciera]:
     db = next(get_db())
     try:
-        return db.query(CategoriaFinanciera).filter(CategoriaFinanciera.codigo == codigo).first()
+        q = db.query(CategoriaFinanciera).filter(CategoriaFinanciera.codigo == codigo)
+        row = q.filter(CategoriaFinanciera.activo.is_(True)).order_by(CategoriaFinanciera.id).first()
+        if row:
+            return row
+        return q.order_by(CategoriaFinanciera.id).first()
     finally:
         db.close()
 
