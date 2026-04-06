@@ -718,12 +718,18 @@ def cargar_datos_desde_bd(archivo_id, usuario_id):
         # Convertir a DataFrame
         datos = []
         for trans in transacciones_bd:
+            saldo_cell = None
+            if trans.saldo is not None:
+                try:
+                    saldo_cell = float(trans.saldo)
+                except (TypeError, ValueError):
+                    saldo_cell = None
             datos.append({
                 "FECHA": trans.fecha,
                 "DESCRIPCION": trans.descripcion or "",
                 "ABONOS (CLP)": float(trans.abono) if trans.abono else 0,
                 "CARGOS (CLP)": float(trans.cargo) if trans.cargo else 0,
-                "SALDO (CLP)": float(trans.saldo) if trans.saldo else None,
+                "SALDO (CLP)": saldo_cell,
                 "CLASIFICACION": trans.clasificacion or "NO CLASIFICADO",
                 "COMENTARIO": trans.comentario or ""
             })
@@ -942,6 +948,20 @@ def cargar_datos(path, config_clasificadores):
                     break
                 if ("DEBITO" in col_upper or "DÉBITO" in col_upper) and ("CLP" in col_upper):
                     mapeo_columnas[col] = "CARGOS (CLP)"
+                    break
+
+        # SALDO cartola (encabezado típico "SALDO" sin "(CLP)")
+        if "SALDO (CLP)" not in df.columns:
+            for col in df.columns:
+                col_upper = str(col).upper().strip()
+                if col_upper == "SALDO" or (
+                    "SALDO" in col_upper
+                    and "ABONO" not in col_upper
+                    and "CARGO" not in col_upper
+                    and "INICIO" not in col_upper
+                    and "FINAL" not in col_upper
+                ):
+                    mapeo_columnas[col] = "SALDO (CLP)"
                     break
 
         # Aplicar mapeo
@@ -1797,6 +1817,10 @@ if config_clasificadores is not None and usuario_actual:
                     dfc["FECHA"] = pd.to_datetime(dfc["FECHA"], errors="coerce")
                 dfc = dfc[dfc["FECHA"].notna()]
                 if not dfc.empty:
+                    _saldos_col = pd.to_numeric(dfc["SALDO (CLP)"], errors="coerce")
+                    # Si ninguna fila trae saldo del banco (típico en BD), el recorrido solo suma
+                    # abonos−cargos y coincide con el flujo neto sin el saldo inicial del sidebar → error en web.
+                    hay_saldo_real_en_extracto = bool(_saldos_col.notna().any())
                     dfc["_ord_orig"] = dfc.index
                     dfc = dfc.sort_values(
                         by=["FECHA", "_ord_orig"],
@@ -1818,7 +1842,7 @@ if config_clasificadores is not None and usuario_actual:
                             running = running + ab - cg
                         else:
                             running = ab - cg
-                    if running is not None:
+                    if running is not None and hay_saldo_real_en_extracto:
                         saldo_cartola = float(running)
                         fecha_saldo_cartola = last_fecha
                         diferencia = saldo_calculado - saldo_cartola
